@@ -12,12 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build (darwin || netbsd || freebsd || openbsd || dragonfly) && race
 // +build darwin netbsd freebsd openbsd dragonfly
 // +build race
 
 package netpoll
 
 import (
+	"log"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -50,6 +52,7 @@ type defaultPoll struct {
 	fd      int
 	trigger uint32
 	m       sync.Map
+	hups    []func(p Poll) error
 }
 
 // Wait implements Poll.
@@ -63,7 +66,6 @@ func (p *defaultPoll) Wait() error {
 	}
 	// wait
 	for {
-		var hups []*FDOperator
 		n, err := syscall.Kevent(p.fd, nil, events, nil)
 		if err != nil && err != syscall.EINTR {
 			// exit gracefully
@@ -89,49 +91,57 @@ func (p *defaultPoll) Wait() error {
 			if !operator.do() {
 				continue
 			}
-			switch {
-			case events[i].Flags&syscall.EV_EOF != 0:
-				hups = append(hups, operator)
-			case events[i].Filter == syscall.EVFILT_READ && events[i].Flags&syscall.EV_ENABLE != 0:
-				// for non-connection
+
+			// check poll in
+			if events[i].Filter == syscall.EVFILT_READ && events[i].Flags&syscall.EV_ENABLE != 0 {
 				if operator.OnRead != nil {
+					// for non-connection
 					operator.OnRead(p)
-					break
+				} else {
+					// only for connection
+					var bs = operator.Inputs(barriers[i].bs)
+					if len(bs) > 0 {
+						var n, err = readv(operator.FD, bs, barriers[i].ivs)
+						operator.InputAck(n)
+						if err != nil && err != syscall.EAGAIN && err != syscall.EINTR {
+							log.Printf("readv(fd=%d) failed: %s", operator.FD, err.Error())
+							p.appendHup(operator)
+							continue
+						}
+					}
 				}
-				// only for connection
-				var bs = operator.Inputs(barriers[i].bs)
-				if len(bs) == 0 {
-					break
-				}
-				var n, err = readv(operator.FD, bs, barriers[i].ivs)
-				operator.InputAck(n)
-				if err != nil && err != syscall.EAGAIN && err != syscall.EINTR {
-					hups = append(hups, operator)
-				}
-			case events[i].Filter == syscall.EVFILT_WRITE && events[i].Flags&syscall.EV_ENABLE != 0:
-				// for non-connection
+			}
+
+			// check hup
+			if events[i].Flags&syscall.EV_EOF != 0 {
+				p.appendHup(operator)
+				continue
+			}
+
+			// check poll out
+			if events[i].Filter == syscall.EVFILT_WRITE && events[i].Flags&syscall.EV_ENABLE != 0 {
 				if operator.OnWrite != nil {
+					// for non-connection
 					operator.OnWrite(p)
-					break
-				}
-				// only for connection
-				var bs, supportZeroCopy = operator.Outputs(barriers[i].bs)
-				if len(bs) == 0 {
-					break
-				}
-				// TODO: Let the upper layer pass in whether to use ZeroCopy.
-				var n, err = sendmsg(operator.FD, bs, barriers[i].ivs, false && supportZeroCopy)
-				operator.OutputAck(n)
-				if err != nil && err != syscall.EAGAIN {
-					hups = append(hups, operator)
+				} else {
+					// only for connection
+					var bs, supportZeroCopy = operator.Outputs(barriers[i].bs)
+					if len(bs) > 0 {
+						// TODO: Let the upper layer pass in whether to use ZeroCopy.
+						var n, err = sendmsg(operator.FD, bs, barriers[i].ivs, false && supportZeroCopy)
+						operator.OutputAck(n)
+						if err != nil && err != syscall.EAGAIN {
+							log.Printf("sendmsg(fd=%d) failed: %s", operator.FD, err.Error())
+							p.appendHup(operator)
+							continue
+						}
+					}
 				}
 			}
 			operator.done()
 		}
 		// hup conns together to avoid blocking the poll.
-		if len(hups) > 0 {
-			p.detaches(hups)
-		}
+		p.detaches()
 	}
 }
 
@@ -172,7 +182,6 @@ func (p *defaultPoll) Control(operator *FDOperator, event PollEvent) error {
 		p.m.Store(operator.FD, operator)
 		evs[0].Filter, evs[0].Flags = syscall.EVFILT_READ, syscall.EV_ADD|syscall.EV_ENABLE
 	case PollDetach:
-		defer operator.unused()
 		p.m.Delete(operator.FD)
 		evs[0].Filter, evs[0].Flags = syscall.EVFILT_READ, syscall.EV_DELETE|syscall.EV_ONESHOT
 	case PollWritable:
@@ -188,18 +197,23 @@ func (p *defaultPoll) Control(operator *FDOperator, event PollEvent) error {
 	return err
 }
 
-func (p *defaultPoll) detaches(hups []*FDOperator) error {
-	var onhups = make([]func(p Poll) error, len(hups))
-	for i := range hups {
-		onhups[i] = hups[i].OnHup
-		p.Control(hups[i], PollDetach)
+func (p *defaultPoll) appendHup(operator *FDOperator) {
+	p.hups = append(p.hups, operator.OnHup)
+	operator.Control(PollDetach)
+	operator.done()
+}
+
+func (p *defaultPoll) detaches() {
+	if len(p.hups) == 0 {
+		return
 	}
+	hups := p.hups
+	p.hups = nil
 	go func(onhups []func(p Poll) error) {
 		for i := range onhups {
 			if onhups[i] != nil {
 				onhups[i](p)
 			}
 		}
-	}(onhups)
-	return nil
+	}(hups)
 }

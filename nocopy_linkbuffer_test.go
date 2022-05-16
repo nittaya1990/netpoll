@@ -62,9 +62,8 @@ func TestLinkBuffer(t *testing.T) {
 	MustNil(t, err)
 	Equal(t, buf.head, read)
 
-	size := block8k / LinkBufferCap
-	inputs := buf.Book(block8k, make([][]byte, size))
-	Equal(t, len(inputs), 1)
+	inputs := buf.book(block1k, block8k)
+	Equal(t, len(inputs), block1k)
 	Equal(t, buf.Len(), 100)
 
 	buf.MallocAck(block1k)
@@ -80,6 +79,91 @@ func TestLinkBuffer(t *testing.T) {
 	err = buf.Skip(block1k)
 	MustNil(t, err)
 	Equal(t, buf.Len(), 100)
+}
+
+// TestLinkBufferWithZero test more case with n is invalid.
+func TestLinkBufferWithInvalid(t *testing.T) {
+	// clean & new
+	LinkBufferCap = 128
+
+	buf := NewLinkBuffer()
+	Equal(t, buf.Len(), 0)
+	MustTrue(t, buf.IsEmpty())
+
+	for n := 0; n > -5; n-- {
+		// test writer
+		p, err := buf.Malloc(n)
+		Equal(t, len(p), 0)
+		Equal(t, buf.MallocLen(), 0)
+		Equal(t, buf.Len(), 0)
+		MustNil(t, err)
+
+		var wn int
+		wn, err = buf.WriteString("")
+		Equal(t, wn, 0)
+		Equal(t, buf.MallocLen(), 0)
+		Equal(t, buf.Len(), 0)
+		MustNil(t, err)
+
+		wn, err = buf.WriteBinary(nil)
+		Equal(t, wn, 0)
+		Equal(t, buf.MallocLen(), 0)
+		Equal(t, buf.Len(), 0)
+		MustNil(t, err)
+
+		err = buf.WriteDirect(nil, n)
+		Equal(t, buf.MallocLen(), 0)
+		Equal(t, buf.Len(), 0)
+		MustNil(t, err)
+
+		var w *LinkBuffer
+		err = buf.Append(w)
+		Equal(t, buf.MallocLen(), 0)
+		Equal(t, buf.Len(), 0)
+		MustNil(t, err)
+
+		err = buf.MallocAck(n)
+		Equal(t, buf.MallocLen(), 0)
+		Equal(t, buf.Len(), 0)
+		if n == 0 {
+			MustNil(t, err)
+		} else {
+			MustTrue(t, err != nil)
+		}
+
+		err = buf.Flush()
+		MustNil(t, err)
+
+		// test reader
+		p, err = buf.Next(n)
+		Equal(t, len(p), 0)
+		MustNil(t, err)
+
+		p, err = buf.Peek(n)
+		Equal(t, len(p), 0)
+		MustNil(t, err)
+
+		err = buf.Skip(n)
+		Equal(t, len(p), 0)
+		MustNil(t, err)
+
+		var s string
+		s, err = buf.ReadString(n)
+		Equal(t, len(s), 0)
+		MustNil(t, err)
+
+		p, err = buf.ReadBinary(n)
+		Equal(t, len(p), 0)
+		MustNil(t, err)
+
+		var r Reader
+		r, err = buf.Slice(n)
+		Equal(t, r.Len(), 0)
+		MustNil(t, err)
+
+		err = buf.Release()
+		MustNil(t, err)
+	}
 }
 
 // cross-block operation test
@@ -137,7 +221,16 @@ func TestLinkBufferIndex(t *testing.T) {
 	Equal(t, buf.flush.off, 0)
 	Equal(t, buf.flush.malloc, 7)
 
-	buf.Book(block8k, make([][]byte, 2))
+	buf.book(block8k, block8k)
+	MustTrue(t, buf.flush == buf.write)
+	Equal(t, buf.flush.off, 0)
+	Equal(t, buf.flush.malloc, 8)
+	Equal(t, buf.flush.Len(), 7)
+	Equal(t, buf.write.off, 0)
+	Equal(t, buf.write.malloc, 8)
+	Equal(t, buf.write.Len(), 7)
+
+	buf.book(block8k, block8k)
 	MustTrue(t, buf.flush != buf.write)
 	Equal(t, buf.flush.off, 0)
 	Equal(t, buf.flush.malloc, 8)
@@ -176,7 +269,7 @@ func TestLinkBufferRefer(t *testing.T) {
 	LinkBufferCap = 8
 
 	wbuf := NewLinkBuffer()
-	wbuf.Book(block8k, make([][]byte, 1))
+	wbuf.book(block8k, block8k)
 	wbuf.Malloc(7)
 	wbuf.Flush()
 	Equal(t, wbuf.Len(), block8k+7)
@@ -363,6 +456,36 @@ func TestUnsafeStringToSlice(t *testing.T) {
 	s = "hi, boy"
 	_ = s
 	Equal(t, string(bs), "hello world")
+}
+
+func TestLinkBufferIndexByte(t *testing.T) {
+	// clean & new
+	LinkBufferCap = 128
+	loopSize := 1000
+	trigger := make(chan struct{}, 16)
+
+	lb := NewLinkBuffer()
+	go func() {
+		for i := 0; i < loopSize; i++ {
+			buf, err := lb.Malloc(1002)
+			buf[500] = '\n'
+			buf[1001] = '\n'
+			MustNil(t, err)
+			lb.Flush()
+			trigger <- struct{}{}
+		}
+	}()
+
+	for i := 0; i < loopSize; i++ {
+		<-trigger
+		last := i * 1002
+		n := lb.indexByte('\n', 0+last)
+		Equal(t, n, 500+last)
+		n = lb.indexByte('\n', 500+last)
+		Equal(t, n, 500+last)
+		n = lb.indexByte('\n', 501+last)
+		Equal(t, n, 1001+last)
+	}
 }
 
 func BenchmarkStringToSliceByte(b *testing.B) {

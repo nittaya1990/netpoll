@@ -46,6 +46,13 @@ type Reader interface {
 	// a faster implementation of Next when the next data is not used.
 	Skip(n int) (err error)
 
+	// Until reads until the first occurrence of delim in the input,
+	// returning a slice stops with delim in the input buffer.
+	// If Until encounters an error before finding a delimiter,
+	// it returns all the data in the buffer and the error itself (often ErrEOF or ErrConnClosed).
+	// Until returns err != nil only if line does not end in delim.
+	Until(delim byte) (line []byte, err error)
+
 	// ReadString is a faster implementation of Next when a string needs to be returned.
 	// It replaces:
 	//
@@ -73,8 +80,17 @@ type Reader interface {
 	//
 	ReadByte() (b byte, err error)
 
-	// Slice returns a new Reader containing the next n bytes from this reader,
-	// the operation is zero-copy, similar to b = p [:n].
+	// Slice returns a new Reader containing the Next n bytes from this Reader.
+	//
+	// If you want to make a new Reader using the []byte returned by Next, Slice already does that,
+	// and the operation is zero-copy. Besides, Slice would also Release this Reader.
+	// The logic pseudocode is similar:
+	//
+	//  var p, err = this.Next(n)
+	//  var reader = new Reader(p) // pseudocode
+	//  this.Release()
+	//  return reader, err
+	//
 	Slice(n int) (r Reader, err error)
 
 	// Release the memory space occupied by all read slices. This method needs to be executed actively to
@@ -166,7 +182,7 @@ type Writer interface {
 
 	// Append the argument writer to the tail of this writer and set the argument writer to nil,
 	// the operation is zero-copy, similar to p = append(p, w.p).
-	Append(w Writer) (n int, err error)
+	Append(w Writer) (err error)
 
 	// Flush will submit all malloc data and must confirm that the allocated bytes have been correctly assigned.
 	// Its behavior is equivalent to the io.Writer hat already has parameters(slice b).

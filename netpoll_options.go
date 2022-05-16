@@ -15,7 +15,6 @@
 package netpoll
 
 import (
-	"context"
 	"time"
 )
 
@@ -24,6 +23,11 @@ import (
 // If the number of cores in your service process is less than 20c, theoretically only one poller is needed.
 // Otherwise you may need to adjust the number of pollers to achieve the best results.
 // Experience recommends assigning a poller every 20c.
+//
+// You can only use SetNumLoops before any connection is created. An example usage:
+// func init() {
+//     netpoll.SetNumLoops(...)
+// }
 func SetNumLoops(numLoops int) error {
 	return setNumLoops(numLoops)
 }
@@ -35,10 +39,26 @@ func SetLoadBalance(lb LoadBalance) error {
 	return setLoadBalance(lb)
 }
 
+// DisableGopool will remove gopool(the goroutine pool used to run OnRequest),
+// which means that OnRequest will be run via `go OnRequest(...)`.
+// Usually, OnRequest will cause stack expansion, which can be solved by reusing goroutine.
+// But if you can confirm that the OnRequest will not cause stack expansion,
+// it is recommended to use DisableGopool to reduce redundancy and improve performance.
+func DisableGopool() error {
+	return disableGopool()
+}
+
 // WithOnPrepare registers the OnPrepare method to EventLoop.
 func WithOnPrepare(onPrepare OnPrepare) Option {
 	return Option{func(op *options) {
 		op.onPrepare = onPrepare
+	}}
+}
+
+// WithOnConnect registers the OnConnect method to EventLoop.
+func WithOnConnect(onConnect OnConnect) Option {
+	return Option{func(op *options) {
+		op.onConnect = onConnect
 	}}
 }
 
@@ -63,18 +83,8 @@ type Option struct {
 
 type options struct {
 	onPrepare   OnPrepare
+	onConnect   OnConnect
+	onRequest   OnRequest
 	readTimeout time.Duration
 	idleTimeout time.Duration
-}
-
-func (opt *options) prepare(onRequest OnRequest) OnPrepare {
-	return func(connection Connection) context.Context {
-		connection.SetOnRequest(onRequest)
-		connection.SetReadTimeout(opt.readTimeout)
-		connection.SetIdleTimeout(opt.idleTimeout)
-		if opt.onPrepare != nil {
-			return opt.onPrepare(connection)
-		}
-		return context.Background()
-	}
 }

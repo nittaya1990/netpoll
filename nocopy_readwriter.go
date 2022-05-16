@@ -15,7 +15,6 @@
 package netpoll
 
 import (
-	"errors"
 	"fmt"
 	"io"
 )
@@ -40,7 +39,7 @@ type zcReader struct {
 // Next implements Reader.
 func (r *zcReader) Next(n int) (p []byte, err error) {
 	if err = r.waitRead(n); err != nil {
-		return p, fmt.Errorf("zcReader buffer next[%d] %w", n, err)
+		return p, err
 	}
 	return r.buf.Next(n)
 }
@@ -48,7 +47,7 @@ func (r *zcReader) Next(n int) (p []byte, err error) {
 // Peek implements Reader.
 func (r *zcReader) Peek(n int) (buf []byte, err error) {
 	if err = r.waitRead(n); err != nil {
-		return buf, fmt.Errorf("zcReader buffer peek[%d] %w", n, err)
+		return buf, err
 	}
 	return r.buf.Peek(n)
 }
@@ -56,7 +55,7 @@ func (r *zcReader) Peek(n int) (buf []byte, err error) {
 // Skip implements Reader.
 func (r *zcReader) Skip(n int) (err error) {
 	if err = r.waitRead(n); err != nil {
-		return fmt.Errorf("zcReader buffer skip[%d] %w", n, err)
+		return err
 	}
 	return r.buf.Skip(n)
 }
@@ -69,7 +68,7 @@ func (r *zcReader) Release() (err error) {
 // Slice implements Reader.
 func (r *zcReader) Slice(n int) (reader Reader, err error) {
 	if err = r.waitRead(n); err != nil {
-		return nil, fmt.Errorf("zcReader buffer slice[%d] %w", n, err)
+		return nil, err
 	}
 	return r.buf.Slice(n)
 }
@@ -82,7 +81,7 @@ func (r *zcReader) Len() (length int) {
 // ReadString implements Reader.
 func (r *zcReader) ReadString(n int) (s string, err error) {
 	if err = r.waitRead(n); err != nil {
-		return s, fmt.Errorf("zcReader buffer read string[%d] %w", n, err)
+		return s, err
 	}
 	return r.buf.ReadString(n)
 }
@@ -90,7 +89,7 @@ func (r *zcReader) ReadString(n int) (s string, err error) {
 // ReadBinary implements Reader.
 func (r *zcReader) ReadBinary(n int) (p []byte, err error) {
 	if err = r.waitRead(n); err != nil {
-		return p, fmt.Errorf("zcReader buffer read binary[%d] %w", n, err)
+		return p, err
 	}
 	return r.buf.ReadBinary(n)
 }
@@ -98,9 +97,13 @@ func (r *zcReader) ReadBinary(n int) (p []byte, err error) {
 // ReadByte implements Reader.
 func (r *zcReader) ReadByte() (b byte, err error) {
 	if err = r.waitRead(1); err != nil {
-		return b, fmt.Errorf("zcReader buffer read byte %w", err)
+		return b, err
 	}
 	return r.buf.ReadByte()
+}
+
+func (r *zcReader) Until(delim byte) (line []byte, err error) {
+	return r.buf.Until(delim)
 }
 
 func (r *zcReader) waitRead(n int) (err error) {
@@ -108,7 +111,7 @@ func (r *zcReader) waitRead(n int) (err error) {
 		err = r.fill(n)
 		if err != nil {
 			if err == io.EOF {
-				err = errors.New("not enough")
+				err = Exception(ErrEOF, "")
 			}
 			return err
 		}
@@ -126,14 +129,17 @@ func (r *zcReader) fill(n int) (err error) {
 			return err
 		}
 		num, err = r.r.Read(buf)
-		if err != nil {
-			return err
-		}
 		if num < 0 {
-			return fmt.Errorf("zcReader fill negative count[%d]", num)
+			if err == nil {
+				err = fmt.Errorf("zcReader fill negative count[%d]", num)
+			}
+			num = 0
 		}
 		r.buf.MallocAck(num)
 		r.buf.Flush()
+		if err != nil {
+			return err
+		}
 	}
 	return err
 }
@@ -180,7 +186,7 @@ func (w *zcWriter) MallocAck(n int) (err error) {
 }
 
 // Append implements Writer.
-func (w *zcWriter) Append(w2 Writer) (n int, err error) {
+func (w *zcWriter) Append(w2 Writer) (err error) {
 	return w.buf.Append(w2)
 }
 
